@@ -30,6 +30,9 @@ services:
       RPC_URL_2: "https://matic-testnet-archive-rpc.bwarelabs.com"
       RPC_URL_3: "https://polygon-testnet.public.blastapi.io"
       POOL_CONTRACT: "0xf0aa37ca2f2e19686858c311bfa5accb3115e2dc"
+      SLOTS_CONTRACT: "0xB678474261569c7ca93E0E06176EC3a4f71183D3"
+      COINFLIP_CONTRACT: "0xA3A200b3a5237a10A8be6FeD5Eb27E41C61372C4"
+      ROULETTE_CONTRACT: "0xaf0bAAB2BC3671D2574E8DD5A3f7409C75263004"
       FIRST_BLOCK: 29192370 
     ports:
       - 8080:8080
