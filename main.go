@@ -16,6 +16,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -28,7 +29,7 @@ var reconnect_attempts_metrics uint32 = 0
 var last_block_metrics uint64 = 0
 
 
-func reconnect(rpc_index *int) (bind.ContractBackend) {
+func reconnect(rpc_index *int) (*ethclient.Client) {
 	for {
 		rpc_env := fmt.Sprintf("RPC_URL_%v", *rpc_index)
 		rpc_url := os.Getenv(rpc_env)
@@ -50,6 +51,30 @@ func reconnect(rpc_index *int) (bind.ContractBackend) {
 	}
 }
 
+// Generics didn't work here
+func insertRecentGameInfo(gameType, player string, moneySpent, moneyWon *big.Int, rawLog *types.Log, client *ethclient.Client, db *sql.DB) (error) {
+	log.Printf("Found %v Res %v", gameType, rawLog)
+
+    header, err := client.HeaderByNumber(context.Background(), new(big.Int).SetUint64(rawLog.BlockNumber))
+    if err != nil {
+        return err
+    }
+
+	blockTime := time.Unix(int64(header.Time), 0)
+	log.Printf("Resolved block creation time %v", blockTime)
+
+	_, err = db.Exec("INSERT IGNORE INTO recent_games(tx, block_number, block_date, game_type, player, deposit, win_amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		fmt.Sprintf("%s:%d", rawLog.TxHash.String(), rawLog.Index),
+		rawLog.BlockNumber,
+		blockTime,
+		gameType,
+		player,
+		new(big.Int).Div(moneySpent, big.NewInt(1000000000)).Uint64(),
+		new(big.Int).Div(moneyWon, big.NewInt(1000000000)).Uint64());
+
+	return err
+}
+
 
 func runScanner(db *sql.DB) {
 	log.Printf("Scanner started")
@@ -63,13 +88,13 @@ func runScanner(db *sql.DB) {
 	}
 
 	slotsContractAddress := common.HexToAddress(os.Getenv("SLOTS_CONTRACT"))
-	slotsContract, err := NewSlots(slotsContractAddress, client)
+	slotsContract, err := NewSlot(slotsContractAddress, client)
 	if err != nil {
 		log.Fatal("Failed to create slots contract binding:", err)
 	}
 
 	rouletteContractAddress := common.HexToAddress(os.Getenv("ROULETTE_CONTRACT"))
-	rouletteContract, err := NewSlots(rouletteContractAddress, client)
+	rouletteContract, err := NewRoulette(rouletteContractAddress, client)
 	if err != nil {
 		log.Fatal("Failed to create roulette contract binding:", err)
 	}
@@ -80,15 +105,15 @@ func runScanner(db *sql.DB) {
 		log.Fatal("Failed to create coinflip contract binding:", err)
 	}
 
-	slotsGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256,uint256,uint256)")
+	slotsGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256[3],uint256)")
 	slotsGameResEventSignatureHash := crypto.Keccak256Hash(slotsGameResEventSignature)
     log.Printf("slotsGameResEventSignatureHash %v", slotsGameResEventSignatureHash.Hex())
 
-	rouletteGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256)");
+	rouletteGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256,uint256)");
 	rouletteGameResEventSignatureHash := crypto.Keccak256Hash(rouletteGameResEventSignature)
 	log.Printf("rouletteGameResEventSignatureHash %v", rouletteGameResEventSignatureHash.Hex())
 
-	coinflipGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256)");
+	coinflipGameResEventSignature := []byte("GameResEvent(uint256,address,uint256,uint256,uint256)");
 	coinflipGameResEventSignatureHash := crypto.Keccak256Hash(coinflipGameResEventSignature)
 	log.Printf("coinflipGameResEventSignatureHash %v", coinflipGameResEventSignatureHash.Hex())
 
@@ -155,12 +180,7 @@ func runScanner(db *sql.DB) {
 				}
 		
 				log.Printf("Found Slots Game Res %v", rawLog)
-				_, err = db.Exec("INSERT IGNORE INTO recent_games(tx, block_number, game_type, player, amount) VALUES (?, ?, 'SLOT', ?, ?)",
-					fmt.Sprintf("%s:%d", rawLog.TxHash.String(), rawLog.Index),
-					rawLog.BlockNumber,
-					slotGameResLog.UserAddress.Hex(),
-					big.NewInt(0).Div(slotGameResLog.WinAmount, big.NewInt(1000000000)).Uint64());
-	
+				err = insertRecentGameInfo("SLOT", slotGameResLog.UserAddress.Hex(), slotGameResLog.VolumeOfGame, slotGameResLog.WinAmount, &rawLog, client, db)	
 				if err != nil {
 					log.Fatal("Unable to insert to DB: %v", err)
 				}
@@ -172,14 +192,7 @@ func runScanner(db *sql.DB) {
 				if err != nil {
 					log.Fatalf("Unable to parse roulette::GameResEvent %v", err)
 				}
-
-				log.Printf("Found Roulette Game Res %v", rawLog)
-				_, err = db.Exec("INSERT IGNORE INTO recent_games(tx, block_number, game_type, player, amount) VALUES (?, ?, 'ROULETTE', ?, ?)",
-					fmt.Sprintf("%s:%d", rawLog.TxHash.String(), rawLog.Index),
-					rawLog.BlockNumber,
-					rouletteGameResLog.UserAddress.Hex(),
-					big.NewInt(0).Div(rouletteGameResLog.WinAmount, big.NewInt(1000000000)).Uint64());
-	
+				err = insertRecentGameInfo("ROULETTE", rouletteGameResLog.UserAddress.Hex(), rouletteGameResLog.VolumeOfGame, rouletteGameResLog.WinAmount, &rawLog, client, db)
 				if err != nil {
 					log.Fatal("Unable to insert to DB: %v", err)
 				}
@@ -191,14 +204,7 @@ func runScanner(db *sql.DB) {
 				if err != nil {
 					log.Fatalf("Unable to parse coinflip::GameResEvent %v", err)
 				}
-		
-				log.Printf("Found Coinflip Game Res %v", rawLog)
-				_, err = db.Exec("INSERT IGNORE INTO recent_games(tx, block_number, game_type, player, amount) VALUES (?, ?, 'COINFLIP', ?, ?)",
-					fmt.Sprintf("%s:%d", rawLog.TxHash.String(), rawLog.Index),
-					rawLog.BlockNumber,
-					coinflipGameResLog.UserAddress.Hex(),
-					big.NewInt(0).Div(coinflipGameResLog.WinAmount, big.NewInt(1000000000)).Uint64());
-	
+				err = insertRecentGameInfo("COINFLIP", coinflipGameResLog.UserAddress.Hex(), coinflipGameResLog.VolumeOfGame, coinflipGameResLog.WinAmount, &rawLog, client, db)
 				if err != nil {
 					log.Fatal("Unable to insert to DB: %v", err)
 				}
@@ -298,9 +304,11 @@ func ensureDatabases(db *sql.DB) {
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS recent_games(
 		tx CHAR(100) PRIMARY KEY,
 		block_number BIGINT NOT NULL,
+		block_date DATETIME,
 		game_type CHAR(10) NOT NULL,
 		player CHAR(42) NOT NULL,
-		amount BIGINT NOT NULL
+		deposit BIGINT NOT NULL,
+		win_amount BIGINT NOT NULL
 	)`)
 	if err != nil {
 		log.Fatal("Failed to create table:", err)
@@ -308,6 +316,7 @@ func ensureDatabases(db *sql.DB) {
 
 	log.Printf("Creating table system_status")
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS system_status(
+		r INT NOT NULL UNIQUE,
 		last_block BIGINT NOT NULL
 	)`)
 	if err != nil {
@@ -318,15 +327,6 @@ func ensureDatabases(db *sql.DB) {
 	err = db.QueryRow("SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'pnl' AND TABLE_NAME = 'system_status' AND COLUMN_NAME = 'r'").Scan(&system_status_has_rowid)
 	if err != nil {
 		log.Fatalf("Unable to check if column 'r' exists for system_status migration: %v", err)
-	}
-	if system_status_has_rowid == 0 {
-		log.Printf("Migration for system_status: add column 'r'")
-		_, err = db.Exec(`ALTER TABLE system_status ADD COLUMN r INT NOT NULL UNIQUE`)
-		if err != nil {
-			log.Fatal("Failed to Migrate table:", err)
-		}
-	} else {
-		log.Print("Already Done: Migration for system_status: add column 'r'")
 	}
 
 	last_block_from_env, err := strconv.ParseUint(os.Getenv("FIRST_BLOCK"), 10, 64)
@@ -342,7 +342,7 @@ func ensureDatabases(db *sql.DB) {
 
 func main() {
 	passwd := os.Getenv("MYSQL_ROOT_PASSWORD")
-	dsn := fmt.Sprintf("root:%v@tcp(db:3306)/pnl", passwd)
+	dsn := fmt.Sprintf("root:%v@tcp(db:3306)/pnl?parseTime=true", passwd)
 	log.Printf("Connecting to %v", dsn)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -433,7 +433,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		referral, hasReferral := r.URL.Query()["referral"]
 		if !hasReferral {
-			rows, err = db.Query("select ref, SUM(payment_received) as amount from ref_payments group by ref;")
+			rows, err = db.Query("select ref, SUM(payment_received) as amount from ref_payments group by ref")
 		} else {
 			rows, err = db.Query("select ref, SUM(payment_received) as amount from ref_payments where LOWER(ref) = LOWER(?) group by ref", referral[0])
 		}
@@ -477,11 +477,62 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 		return
 
+	case "/summary":
+		type SummarySpendingsEntry = struct{
+			Game string `json:"game"`
+			TotalSpent float64 `json:"total_spent"`
+			TotalWon float64 `json:"total_won"`
+		}
+		type Response = struct {
+			Data []SummarySpendingsEntry
+		}
+		var resp Response
+		rows, err := db.Query("select game_type, SUM(deposit), SUM(win_amount) from recent_games group by game_type")
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry SummarySpendingsEntry
+			var amount, win_amount float64
+			err := rows.Scan(&entry.Game, &amount, &win_amount)
+			entry.TotalSpent = amount / 1e9
+			entry.TotalWon = win_amount / 1e9
+			if err != nil {
+				break
+			}
+			resp.Data = append(resp.Data, entry)
+		}
+		// Check for errors during rows "Close".
+		// This may be more important if multiple statements are executed
+		// in a single batch and rows were written as well as read.
+		if closeErr := rows.Close(); closeErr != nil {
+			http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Check for row scan error.
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Check for errors during row iteration.
+		if err = rows.Err(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		json.NewEncoder(w).Encode(resp)
+
+		return
+
 	case "/recent-games":
 		type RecentGameEntry = struct {
 			Address string `json:"address"`
 			BlockNumber uint64 `json:"block_number"`
+			BlockTime time.Time `json:"block_time"`
 			GameType string `json:"game_type"`
+			Deposit float64 `json:"deposit"`
 			WinAmount float64 `json:"win_amount"`
 		}
 		type Response = struct {
@@ -491,12 +542,33 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var rows *sql.Rows
 		var err error
 
+		firstCondition := true
+		sqlStatement := "select block_number, block_date, game_type, player, deposit, win_amount from recent_games "
+		whereVal := make([]interface{}, 0)
 		gameType, hasGameType := r.URL.Query()["game-type"]
-		if !hasGameType {
-			rows, err = db.Query("select block_number, game_type, player, amount from recent_games order by block_number desc limit 25;")
-		} else {
-			rows, err = db.Query("select block_number, game_type, player, amount from recent_games WHERE game_type = ? order by block_number desc limit 25;", gameType[0])
+		if hasGameType {
+			if firstCondition {
+				sqlStatement = sqlStatement + "where "
+				firstCondition = false
+			} else {
+				sqlStatement = sqlStatement + "and "
+			}
+			sqlStatement = sqlStatement + "game_type = ? "
+			whereVal = append(whereVal, gameType[0])
 		}
+		player, hasPlayer := r.URL.Query()["player"]
+		if hasPlayer {
+			if firstCondition {
+				sqlStatement = sqlStatement + "where "
+				firstCondition = false
+			} else {
+				sqlStatement = sqlStatement + "and "
+			}
+			sqlStatement = sqlStatement + "player = ? "
+			whereVal = append(whereVal, player[0])
+		}
+		sqlStatement = sqlStatement + "order by block_number desc limit 25;"
+		rows, err = db.Query(sqlStatement, whereVal...)
 
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -506,9 +578,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		for rows.Next() {
 			var entry RecentGameEntry
-			var amount float64
-			err = rows.Scan(&entry.BlockNumber, &entry.GameType, &entry.Address, &amount)
-			entry.WinAmount = amount / 1e9
+			var win_amount, deposit float64
+			err = rows.Scan(&entry.BlockNumber, &entry.BlockTime, &entry.GameType, &entry.Address, &deposit, &win_amount)
+			entry.Deposit = deposit / 1e9
+			entry.WinAmount = win_amount / 1e9
 			if err != nil {
 				break
 			}

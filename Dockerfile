@@ -21,16 +21,16 @@ RUN cd /go/src && \
 COPY main.go /go/src/
 
 COPY strip_abi.sh \
-     Slots.json Coinflip.json Roulette.json \
+     Slot.json Coinflip.json Roulette.json \
      JustPool.json \
      /tmp/
 
 RUN chmod +x /tmp/strip_abi.sh && \
-    /tmp/strip_abi.sh /tmp/JustPool.json /tmp/Roulette.json /tmp/Slots.json /tmp/Coinflip.json 
+    /tmp/strip_abi.sh /tmp/JustPool.json /tmp/Roulette.json /tmp/Slot.json /tmp/Coinflip.json 
 
 RUN /go/bin/abigen --pkg main --type CasinoPool --abi /tmp/JustPoolStriped.json --out /go/src/casinopool.go
 RUN /go/bin/abigen --pkg main --type Roulette --abi /tmp/RouletteStriped.json --out /go/src/roulette.go
-RUN /go/bin/abigen --pkg main --type Slots --abi /tmp/SlotsStriped.json --out /go/src/slots.go
+RUN /go/bin/abigen --pkg main --type Slot --abi /tmp/SlotStriped.json --out /go/src/slots.go
 RUN /go/bin/abigen --pkg main --type Coinflip --abi /tmp/CoinflipStriped.json --out /go/src/coinflip.go
 
 RUN cd /go/src && \
